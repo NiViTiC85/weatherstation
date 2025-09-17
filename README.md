@@ -1,2 +1,3 @@
 # Weatherstation
-ErikGefvert
+Erik Gefvert
+Niklas Christensen
