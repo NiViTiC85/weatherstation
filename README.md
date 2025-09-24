@@ -1,4 +1,4 @@
 # Weatherstation
-Erik Gefvert
+Erik Gefvert\n
 Niklas Christensen
 David Ljubicic
