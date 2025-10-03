@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-import os, glob, time, json, serial
+import os, glob, time, json, serial, warnings   
 import paho.mqtt.client as mqtt
+
+# Dölj DeprecationWarning för paho-mqtt (API v1 → deprecated i nyare versioner)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 """
   Väderstation: Vindhastighet (Arduino) + Temperatur (DS18B20) → MQTT
   -------------------------------------------------------------------
   - Arduino skickar vindhastighet i JSON-format via USB/seriell:
       {"ws_ms": 1.57}
-  - Raspberry Pi läser DS18B20 via 1-Wire (filbaserad åtkomst).
+  - Raspberry Pi läser DS18B20 via 1-Wire (redan aktiverad i /boot/config.txt).
   - Båda värden publiceras till MQTT-broker.
 
-  MQTT-konfiguration (exempel):
+  MQTT-konfiguration:
     Host: 100.82.0.4
     Port: 1883
     User: elektronik
@@ -19,14 +22,13 @@ import paho.mqtt.client as mqtt
       pi11/sensor/1   → Vindhastighet (m/s)
       pi11/sensor/2   → Temperatur (°C)
 
-  Programmet:
-  1. Initierar 1-Wire för DS18B20.
-  2. Hittar Arduinons serieport (/dev/ttyACM* eller /dev/ttyUSB*).
-  3. Läser kontinuerligt:
+  Programflöde:
+  1. Hitta Arduinons serieport (/dev/ttyACM* eller /dev/ttyUSB*).
+  2. Läs kontinuerligt:
        - Vindhastighet (JSON från Arduino).
        - Temperatur (från DS18B20, en gång per sekund).
-  4. Publicerar båda värdena till MQTT.
-  5. Skriver även ut en kombinerad JSON-rad för debug:
+  3. Publicera båda värdena till MQTT.
+  4. Skriv även ut en kombinerad JSON-rad för debug:
        {"ws_ms": 1.57, "temp_c": 22.88}
 """
 
@@ -47,6 +49,7 @@ TOPIC_WS   = "pi11/sensor/1"   # Vindhastighet (m/s)
 TOPIC_TEMP = "pi11/sensor/2"   # Temperatur (°C)
 # ============================================
 
+
 def find_serial_port():
     """
     Försök hitta Arduino-porten på Linux.
@@ -56,19 +59,12 @@ def find_serial_port():
     candidates = glob.glob("/dev/ttyACM*") + glob.glob("/dev/ttyUSB*")
     return candidates[0] if candidates else None
 
-# --- DS18B20 (temperatur) ---
-def init_1wire():
-    """
-    Ladda kernelmoduler för 1-Wire om de inte redan är laddade.
-    Gör att DS18B20 exponeras i /sys/bus/w1/devices/28-xxxx/w1_slave.
-    """
-    os.system('modprobe w1-gpio')
-    os.system('modprobe w1-therm')
 
 def read_temp_c():
     """
     Läs temperatur i °C från DS18B20.
     Returnerar float (t.ex. 22.81) eller None om läsningen misslyckas.
+    Kräver att 1-Wire redan är aktiverat via dtoverlay=w1-gpio i /boot/config.txt
     """
     base_dir = '/sys/bus/w1/devices/'
     devices = glob.glob(base_dir + '28-*')   # alla DS18B20 börjar med "28-"
@@ -92,10 +88,7 @@ def read_temp_c():
 
 
 def main():
-    # 1. Initiera 1-Wire
-    init_1wire()
-
-    # 2. Hitta Arduino-port
+    # 1. Hitta Arduino-port
     port = find_serial_port()
     if not port:
         print("Hittade ingen serieport (/dev/ttyACM* eller /dev/ttyUSB*).")
@@ -103,8 +96,9 @@ def main():
     print(f"Öppnar serieport: {port}")
     ser = serial.Serial(port, SER_BAUD, timeout=SER_TIMEOUT)
 
-    # 3. Initiera MQTT-klient och anslut
-    client = mqtt.Client()
+    # 2. Initiera MQTT-klient och anslut
+    #    - protocol=MqttV311 → standard (3.1.1, stöds av nästan alla brokers)
+    client = mqtt.Client(protocol=mqtt.MQTTv311)
     client.username_pw_set(MQTT_USER, MQTT_PASS)
     client.connect(MQTT_HOST, MQTT_PORT, 60)
     client.loop_start()
@@ -124,9 +118,9 @@ def main():
                         payload = json.loads(line)      # {"ws_ms":...}
                         ws = float(payload.get("ws_ms", 0.0))
                     except Exception:
-                        pass  # ogiltig rad → hoppa
+                        pass  # ogiltig rad → hoppa över
             except Exception:
-                pass  # problem med serial → hoppa
+                pass  # problem med serial → hoppa över
 
             # --- Läs temperatur en gång per sekund ---
             now = time.time()
@@ -147,12 +141,14 @@ def main():
                 combined = {"ws_ms": round(ws, 2), "temp_c": round(temp_c, 2)}
                 print(json.dumps(combined))
 
-            time.sleep(0.05)  # vila lite för att inte belasta CPU onödigt mycket
+            # Kort paus så CPU:n inte går på 100%
+            time.sleep(0.05)
 
     except KeyboardInterrupt:
         # Avsluta snyggt med Ctrl+C
         pass
     finally:
+        # Stäng ner serieport och MQTT ordentligt
         ser.close()
         client.loop_stop()
         client.disconnect()
